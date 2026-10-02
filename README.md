@@ -6,3 +6,5 @@
 * Closes to Tray, the app automatically flushes it's internal state while in Tray, but runs in a low-power state which is required for the Tray Hover Usage monitoring, and also the tray Icon Usage Display.
 
 *Built using C++*
+
+<img width="128" height="128" alt="taskmgr-6" src="https://github.com/user-attachments/assets/28d49230-0495-4978-aae1-1fa2abd1229c" />
