@@ -55,12 +55,12 @@ using namespace Gdiplus;
 enum { IDM_OPEN = 1001, IDM_EXIT, IDM_ACT, IDM_LOC, IDM_PRIO = 1200 };
 enum { H_TAB = 100, H_PERF = 200, H_ACT = 300, H_SET = 400 };
 enum { M_CPU, M_MEM, M_DISK, M_NET, M_GPU, M_N };
-enum { S_MICA, S_THEME, S_CLOSE, S_STARTUP, S_REFRESH, S_PRIO, S_TRAYHOVER, S_TRAYICON, S_TOPMOST, S_CONFIRM, S_COUNT };
+enum { S_MICA, S_THEME, S_CLOSE, S_STARTUP, S_REFRESH, S_PRIO, S_TRAYHOVER, S_TRAYICON, S_TOPMOST, S_CONFIRM, S_SCALE, S_COUNT };
 
 static const wchar_t* kMName[M_N] = { L"CPU", L"Memory", L"Disk", L"Network", L"GPU" };
 static const COLORREF kCol[M_N] = { RGB(17,125,187), RGB(139,18,174), RGB(76,162,10), RGB(167,79,1), RGB(0,150,160) };
-static const wchar_t* kCfgName[S_COUNT] = { L"Mica", L"Theme", L"CloseToTray", L"StartWithWindows", L"Refresh", L"Priority", L"TrayHover", L"TrayIcon", L"TopMost", L"Confirm" };
-static const int kCfgDef[S_COUNT] = { 1, 0, 1, 0, 0, 1, 1, 0, 0, 1 };
+static const wchar_t* kCfgName[S_COUNT] = { L"Mica", L"Theme", L"CloseToTray", L"StartWithWindows", L"Refresh", L"Priority", L"TrayHover", L"TrayIcon", L"TopMost", L"Confirm", L"Scale" };
+static const int kCfgDef[S_COUNT] = { 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1 };
 static const DWORD kPrioCls[3] = { IDLE_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS };
 static const COLORREF ACCENT = RGB(0, 120, 212);
 static const int HN = 60;   // history samples
@@ -77,7 +77,9 @@ static ULONGLONG g_prevTot, g_prevIdle, g_prevIn, g_prevOut, g_netTick, g_lastWa
 static DWORD g_ncpu = 1, g_cpuMHz; static std::wstring g_cpuName, g_gpuName;
 static bool g_timerOn;
 
-static int s(int v) { return MulDiv(v, g_dpi, 96); }
+static const int kScalePct[3] = { 100, 125, 150 };
+static int s(int v) { return MulDiv(v * kScalePct[g_cfg[S_SCALE] % 3], g_dpi, 9600); }
+static void makeFont();
 static double clampd(double v, double lo = 0, double hi = 100) { return v < lo ? lo : (v > hi ? hi : v); }
 static ULONGLONG ft2u(const FILETIME& f) { return ((ULONGLONG)f.dwHighDateTime << 32) | f.dwLowDateTime; }
 static std::wstring F(const wchar_t* f, ...) { wchar_t b[320]; va_list a; va_start(a, f); _vsnwprintf(b, 319, f, a); va_end(a); b[319] = 0; return b; }
@@ -373,8 +375,8 @@ static void applyDwm(HWND h) {
     DwmExtendFrameIntoClientArea(h, &m); InvalidateRect(h, 0, TRUE);
 }
 struct Th { COLORREF bg, card, card2, text, sub, graph, grid; };
-static Th th() { return g_dark ? Th{ RGB(32,32,32), RGB(46,46,46), RGB(58,58,58), RGB(255,255,255), RGB(172,172,172), RGB(30,30,30), RGB(60,60,60) }
-                               : Th{ RGB(243,243,243), RGB(251,251,251), RGB(232,232,232), RGB(20,20,20), RGB(100,100,100), RGB(255,255,255), RGB(228,228,228) }; }
+static Th th() { return g_dark ? Th{ RGB(32,32,32), RGB(46,46,46), RGB(58,58,58), RGB(255,255,255), RGB(172,172,172), RGB(30,30,30), RGB(47,47,47) }
+                               : Th{ RGB(243,243,243), RGB(251,251,251), RGB(232,232,232), RGB(20,20,20), RGB(100,100,100), RGB(255,255,255), RGB(238,238,238) }; }
 static void applyListTheme() {
     if (!g_hList) return; Th t = th();
     SetWindowTheme(g_hList, g_dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
@@ -397,7 +399,10 @@ static void applyCfg() {
     computeDark(); SetPriorityClass(GetCurrentProcess(), kPrioCls[g_cfg[S_PRIO]]); startupReg(g_cfg[S_STARTUP] != 0);
     if (g_hMain) {
         SetWindowPos(g_hMain, g_cfg[S_TOPMOST] ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        applyDwm(g_hMain); applyListTheme(); InvalidateRect(g_hMain, 0, TRUE);
+        applyDwm(g_hMain); applyListTheme();
+        makeFont(); SendMessageW(g_hList, WM_SETFONT, (WPARAM)g_font, TRUE);
+        if (g_tab == 0 || g_tab == 2 || g_tab == 3) { setupColumns(); fillList(); }
+        layout(); InvalidateRect(g_hMain, 0, TRUE);
     }
     applyTimer(); trayRefresh(false, true); saveCfg();
 }
@@ -405,15 +410,20 @@ static void applyCfg() {
 // ------------------------------------------------------------------ painting helpers
 struct Hit { RectF r; int id, val; };
 static std::vector<Hit> g_hits; static int g_hovId = -1, g_hovVal = -1;
-static HDC g_bbDC; static HBITMAP g_bbBmp, g_bbOld; static int g_bbW, g_bbH;
+static HDC g_bbDC; static HBITMAP g_bbBmp, g_bbOld; static int g_bbW, g_bbH; static void* g_bbBits;
 static Color C(COLORREF c, int a = 255) { return Color((BYTE)a, GetRValue(c), GetGValue(c), GetBValue(c)); }
 static void rrPath(GraphicsPath& p, RectF r, float d) {
     p.AddArc(r.X, r.Y, d, d, 180, 90); p.AddArc(r.GetRight() - d, r.Y, d, d, 270, 90);
     p.AddArc(r.GetRight() - d, r.GetBottom() - d, d, d, 0, 90); p.AddArc(r.X, r.GetBottom() - d, d, d, 90, 90); p.CloseFigure();
 }
 static void fillRR(Graphics& g, COLORREF c, RectF r, float rad, int a = 255) { GraphicsPath p; rrPath(p, r, rad * 2); SolidBrush b(C(c, a)); g.FillPath(&b, &p); }
+static FontFamily *g_ff, *g_ffb;   // semibold body text, regular family for bold headings
+static FontFamily* fam(bool bold) {
+    if (!g_ff) { FontFamily v(L"Segoe UI Semibold"); g_ff = v.IsAvailable() ? new FontFamily(L"Segoe UI Semibold") : new FontFamily(L"Segoe UI"); g_ffb = new FontFamily(L"Segoe UI"); }
+    return bold ? g_ffb : g_ff;
+}
 static void text(Graphics& g, const std::wstring& t, float px, bool bold, COLORREF col, float x, float y, float w = 0, int al = 0) {
-    FontFamily ff(L"Segoe UI"); Font f(&ff, px, bold ? FontStyleBold : FontStyleRegular, UnitPixel); SolidBrush b(C(col));
+    Font f(fam(bold), px, bold ? FontStyleBold : FontStyleRegular, UnitPixel); SolidBrush b(C(col));
     StringFormat sf(StringFormatFlagsNoWrap); sf.SetTrimming(StringTrimmingEllipsisCharacter); sf.SetAlignment(al == 0 ? StringAlignmentNear : al == 1 ? StringAlignmentCenter : StringAlignmentFar);
     RectF r(x, y, w > 0 ? w : 3000.f, px * 1.7f); g.DrawString(t.c_str(), -1, &f, r, &sf, &b);
 }
@@ -427,8 +437,8 @@ static void drawGraph(Graphics& g, RectF r, int m, bool big) {
     std::vector<PointF> pts; for (int i = 0; i < HN; i++) pts.push_back(PointF(r.X + r.Width * i / (HN - 1), (REAL)(r.GetBottom() - (r.Height - 1) * clampd(g_hist[m][i] / mx, 0, 1))));
     std::vector<PointF> poly = pts; poly.push_back(PointF(r.GetRight(), r.GetBottom())); poly.push_back(PointF(r.X, r.GetBottom()));
     g.SetClip(r); SolidBrush fb(C(kCol[m], 70)); g.FillPolygon(&fb, poly.data(), (INT)poly.size());
-    Pen lp(C(kCol[m]), big ? 2.f : 1.2f); g.DrawLines(&lp, pts.data(), (INT)pts.size()); g.ResetClip();
-    Pen bp(C(kCol[m]), 1.f); g.DrawRectangle(&bp, r.X, r.Y, r.Width - 1, r.Height - 1);
+    Pen lp(C(kCol[m]), big ? 1.6f : 1.2f); g.DrawLines(&lp, pts.data(), (INT)pts.size()); g.ResetClip();
+    Pen bp(C(kCol[m], big ? 200 : 255), 1.f); g.DrawRectangle(&bp, r.X, r.Y, r.Width - 1, r.Height - 1);
 }
 static std::wstring uptime() { ULONGLONG ms = GetTickCount64() / 1000; return F(L"%llu:%02llu:%02llu:%02llu", ms / 86400, ms / 3600 % 24, ms / 60 % 60, ms % 60); }
 static std::wstring perfValue(int m) {
@@ -461,6 +471,7 @@ static void paintSettings(Graphics& g, RECT cr, const Th& t) {
         { -1, L"Appearance", L"", {} },
         { S_MICA, L"Mica effects", L"Translucent Mica material on the title bar and app background (Windows 11)", {} },
         { S_THEME, L"Theme", L"Follow Windows, or force light / dark", { L"System", L"Light", L"Dark" } },
+        { S_SCALE, L"Interface size", L"Scale text and controls (applies instantly)", { L"100%", L"125%", L"150%" } },
         { S_TOPMOST, L"Always on top", L"Keep Task Manager above other windows", {} },
         { -1, L"Behavior", L"", {} },
         { S_CLOSE, L"Close to tray", L"Closing the window sends it to the tray and frees its memory", {} },
@@ -512,10 +523,10 @@ static void paintMain(HWND h, HDC dc) {
     if (!g_bbDC || g_bbW != W || g_bbH != H) {
         if (g_bbDC) { SelectObject(g_bbDC, g_bbOld); DeleteObject(g_bbBmp); DeleteDC(g_bbDC); }
         g_bbDC = CreateCompatibleDC(dc); BITMAPINFO bi = {}; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
-        void* bits; g_bbBmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, 0, 0); g_bbOld = (HBITMAP)SelectObject(g_bbDC, g_bbBmp); g_bbW = W; g_bbH = H;
+        g_bbBmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &g_bbBits, 0, 0); g_bbOld = (HBITMAP)SelectObject(g_bbDC, g_bbBmp); g_bbW = W; g_bbH = H;
     }
     {
-        Graphics g(g_bbDC); g.SetSmoothingMode(SmoothingModeAntiAlias); g.SetTextRenderingHint(TextRenderingHintAntiAlias); g.SetPixelOffsetMode(PixelOffsetModeHalf);
+        Bitmap surf(W, H, W * 4, PixelFormat32bppPARGB, (BYTE*)g_bbBits); Graphics g(&surf); g.SetSmoothingMode(SmoothingModeAntiAlias); g.SetTextRenderingHint(TextRenderingHintAntiAlias); g.SetPixelOffsetMode(PixelOffsetModeHalf); g.SetTextContrast(3);
         Th t = th(); g_hits.clear();
         g.SetCompositingMode(CompositingModeSourceCopy);
         SolidBrush bgb(g_micaOn ? Color(0, 0, 0, 0) : C(t.bg)); g.FillRectangle(&bgb, 0, 0, W, H);   // alpha 0 => Mica shows through
@@ -556,7 +567,7 @@ static void paintMain(HWND h, HDC dc) {
             float gh = (float)(std::max)(s(150), (std::min)(s(340), (int)(ch * 0.45f))), gy = ct + s(44);
             text(g, m == M_NET ? L"Throughput" : L"% Utilization", (float)s(11), false, t.sub, px, gy); text(g, F(L"%d seconds", HN * (g_cfg[S_REFRESH] + 1)), (float)s(11), false, t.sub, px, gy, pw, 2);
             drawGraph(g, RectF(px, gy + s(18), pw, gh), m, true);
-            float sy = gy + s(18) + gh + s(22), cwid = pw / 3;
+            float sy = gy + s(18) + gh + s(22), cwid = (pw - s(32)) / 3; fillRR(g, t.card, RectF(px, sy - s(12), pw, (float)(((int)st.size() + 2) / 3 * s(62) + s(10))), (float)s(6)); px += s(16);
             for (size_t i = 0; i < st.size(); i++) {
                 float ccx = px + (i % 3) * cwid, ccy = sy + (i / 3) * s(62);
                 text(g, st[i].first, (float)s(12), false, t.sub, ccx, ccy, cwid - s(8)); text(g, st[i].second, (float)s(19), false, t.text, ccx, ccy + s(18), cwid - s(8));
@@ -574,7 +585,7 @@ static void readHwInfo() {
     DISPLAY_DEVICEW dd = {}; dd.cb = sizeof dd; g_gpuName = EnumDisplayDevicesW(0, 0, &dd, 0) ? dd.DeviceString : L"GPU";
     SYSTEM_INFO si; GetSystemInfo(&si); g_ncpu = si.dwNumberOfProcessors;
 }
-static void makeFont() { if (g_font) DeleteObject(g_font); g_font = CreateFontW(-s(13), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI"); }
+static void makeFont() { if (g_font) DeleteObject(g_font); g_font = CreateFontW(-s(13), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI"); }
 static void contextMenu(POINT pt) {
     Row* r = selRow(); if (!r) return; HMENU m = CreatePopupMenu();
     if (g_tab == 0) { AppendMenuW(m, MF_STRING, IDM_ACT, L"End task"); AppendMenuW(m, MF_STRING, IDM_LOC, L"Open file location");
@@ -596,7 +607,7 @@ static void cleanupMain() {   // give everything back while sitting in the tray
     std::vector<Row>().swap(g_rows); std::vector<SInfo>().swap(g_sinfo); std::unordered_map<DWORD, ULONGLONG>().swap(g_pcpu); std::vector<Hit>().swap(g_hits);
     if (g_bbDC) { SelectObject(g_bbDC, g_bbOld); DeleteObject(g_bbBmp); DeleteDC(g_bbDC); g_bbDC = 0; g_bbBmp = 0; g_bbW = g_bbH = 0; }
     if (g_font) { DeleteObject(g_font); g_font = 0; } fullClose();
-    if (g_gdipOn) { GdiplusShutdown(g_gdipTok); g_gdipOn = false; }
+    if (g_gdipOn) { delete g_ff; delete g_ffb; g_ff = g_ffb = 0; GdiplusShutdown(g_gdipTok); g_gdipOn = false; }
     g_lastWall = 0; g_prevIn = 0; g_netTick = 0; g_hasSel = false;
 }
 static void trimMemory() { HeapCompact(GetProcessHeap(), 0); SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1); EmptyWorkingSet(GetCurrentProcess()); }
@@ -645,7 +656,7 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 static void showMain() {
     if (g_hMain) { if (IsIconic(g_hMain)) ShowWindow(g_hMain, SW_RESTORE); SetForegroundWindow(g_hMain); return; }
     if (!g_gdipOn) { GdiplusStartupInput in; GdiplusStartup(&g_gdipTok, &in, nullptr); g_gdipOn = true; }
-    UINT d = GetDpiForSystem(); int w = MulDiv(1060, d, 96), hh = MulDiv(720, d, 96);
+    UINT d = GetDpiForSystem(); int pc = kScalePct[g_cfg[S_SCALE] % 3]; int w = MulDiv(1000 * pc, d, 9600), hh = MulDiv(680 * pc, d, 9600);
     CreateWindowExW(0, L"TaskmgrMain", L"Task Manager", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, w, hh, 0, 0, g_hInst, 0);
     if (g_hMain) SetForegroundWindow(g_hMain);
 }
