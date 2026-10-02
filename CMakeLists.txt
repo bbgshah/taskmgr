@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.15)
+project(Taskmgr CXX RC)
+set(CMAKE_CXX_STANDARD 17)
+add_executable(taskmgr WIN32 main.cpp resource.rc)
+target_compile_definitions(taskmgr PRIVATE UNICODE _UNICODE)
+if(MSVC)
+  target_compile_options(taskmgr PRIVATE /utf-8 /O2)
+  target_link_options(taskmgr PRIVATE /MANIFEST:NO)   # manifest is embedded via resource.rc
+else()
+  target_link_options(taskmgr PRIVATE -municode -mwindows -static)
+  target_link_libraries(taskmgr comctl32 dwmapi uxtheme pdh iphlpapi psapi gdiplus shell32 advapi32 ole32 ws2_32 gdi32 user32)
+endif()
